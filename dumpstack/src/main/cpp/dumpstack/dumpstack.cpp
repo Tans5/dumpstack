@@ -4,8 +4,10 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include "dumpstack.h"
 #include "android_log.h"
+#include "bytehook.h"
 
 // 8 KB
 #define MAX_BUFFER_SIZE 1024 * 8
@@ -86,7 +88,117 @@ void setDirs(const char* anrTraceDir,
     LOGD("AnrTraceDir: %s, StackTraceDir: %s", anrTraceDir, stackTraceDir);
 }
 
+static int gSignalCatcherTid = -1;
+
+// connect hook.
+int (*origin_connect)(int __fd, const struct sockaddr *__addr, socklen_t __addr_length);
+bytehook_stub_t gConnectStub = nullptr;
+int my_connect(int __fd, const struct sockaddr *__addr, socklen_t __addr_length) {
+    LOGD("Hook signal catcher, path: %s", __addr->sa_data);
+    return origin_connect(__fd, __addr, __addr_length);
+}
+void my_connect_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
+                         const char *sym_name, void *new_func, void *prev_func, void *arg) {
+    gConnectStub = task_stub;
+    if (prev_func != nullptr) {
+        origin_connect = reinterpret_cast<int (*)(int __fd, const struct sockaddr *__addr, socklen_t __addr_length)>(prev_func);
+    }
+    LOGD("Hook connect method result: %d", status_code);
+}
+
+
+// open hook.
+int (*origin_open)(const char* pathname, int flags, mode_t mode);
+bytehook_stub_t gOpenStub = nullptr;
+int my_open(const char *pathname, int flags, mode_t mode) {
+    return origin_open(pathname, flags, mode);
+}
+void my_open_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
+                              const char *sym_name, void *new_func, void *prev_func, void *arg) {
+    gOpenStub = task_stub;
+    if (prev_func != nullptr) {
+        origin_open = reinterpret_cast<int (*)(const char* pathname, int flags, mode_t mode)>(prev_func);
+    }
+    LOGD("Hook open method result: %d", status_code);
+}
+
+
+// write hook.
+ssize_t (*origin_write)(int fd, const void *const buf, size_t count);
+bytehook_stub_t gWriteStub = nullptr;
+ssize_t my_write(int fd, const void *const buf, size_t count) {
+    if (gSignalCatcherTid == gettid()) {
+        bytehook_unhook(gWriteStub);
+        gWriteStub = nullptr;
+
+        LOGD("SignalCatcher write count: %d", count);
+    }
+    return origin_write(fd, buf, count);
+}
+void my_write_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
+                           const char *sym_name, void *new_func, void *prev_func, void *arg) {
+    gWriteStub = task_stub;
+    if (prev_func != nullptr) {
+        origin_write = reinterpret_cast<ssize_t (*)(int fd, const void *const buf, size_t count)>(prev_func);
+    }
+    LOGD("Hook write method result: %d", status_code);
+}
+
 void obtainCurrentStacks() {
+    int apiLevel = android_get_device_api_level();
     int signalCatcherTid = getSignalCatcherTid();
-    LOGD("SignalCatcherTid: %d", signalCatcherTid);
+    gSignalCatcherTid = signalCatcherTid;
+    LOGD("ApiLevel: %d, SignalCatcherTid: %d", apiLevel, signalCatcherTid);
+    if (signalCatcherTid <= 0) {
+        LOGE("Get Signal Catcher tid fail.");
+        return;
+    }
+//    if (apiLevel >= 27) {
+//        if (gConnectStub != nullptr) {
+//            bytehook_unhook(gConnectStub);
+//            gConnectStub = nullptr;
+//        }
+//        bytehook_hook_single(
+//                "libcutils.so",
+//                nullptr,
+//                "connect",
+//                (void *)my_connect,
+//                my_connect_hook_callback,
+//                nullptr
+//        );
+//    } else {
+//        if (gOpenStub != nullptr) {
+//            bytehook_unhook(gOpenStub);
+//            gConnectStub = nullptr;
+//        }
+//        bytehook_hook_single(
+//                "libart.so",
+//                nullptr,
+//                "open",
+//                (void *)my_open,
+//                my_open_hook_callback,
+//                nullptr
+//                );
+//    }
+
+    if (gWriteStub != nullptr) {
+        bytehook_unhook(gWriteStub);
+        gWriteStub = nullptr;
+    }
+    char *writeLibName;
+    if (apiLevel >= 30 || apiLevel == 25 || apiLevel == 24) {
+        writeLibName = "libc.so";
+    } else if (apiLevel == 29) {
+        writeLibName = "libbase.so";
+    } else {
+        writeLibName = "libart.so";
+    }
+    bytehook_hook_single(
+            writeLibName,
+            nullptr,
+            "write",
+            (void *)my_write,
+            my_write_hook_callback,
+            nullptr);
+    kill(getpid(), SIGQUIT);
 }
