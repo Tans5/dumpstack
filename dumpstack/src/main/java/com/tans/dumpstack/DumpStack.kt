@@ -34,6 +34,7 @@ object DumpStack {
             if (!stackTraceDir.isDirectory) {
                 stackTraceDir.mkdirs()
             }
+            DumpStackLog.d("AnrTraceDir: ${anrTraceDir.canonicalPath}, StackTraceDir: ${stackTraceDir.canonicalPath}")
             System.loadLibrary("dumpstack")
             setDirs(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
             val byteHookResult = ByteHook.init()

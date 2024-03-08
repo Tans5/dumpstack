@@ -11,8 +11,10 @@ Java_com_tans_dumpstack_DumpStack_setDirs(
         jobject /* this */,
         jstring anrTraceDir,
         jstring stackTraceDir) {
-    jboolean copy = true;
-    setDirs((const char *)env->GetStringChars(anrTraceDir, &copy),
-            (const char *)env->GetStringChars(stackTraceDir, &copy));
+    jboolean copy = JNI_FALSE;
+    setDirs((const char *)env->GetStringUTFChars(anrTraceDir, &copy),
+            env->GetStringUTFLength(anrTraceDir),
+            (const char *)env->GetStringUTFChars(stackTraceDir, &copy),
+            env->GetStringUTFLength(stackTraceDir));
 }
 
