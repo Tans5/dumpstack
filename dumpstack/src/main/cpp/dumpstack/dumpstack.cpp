@@ -15,6 +15,12 @@
 const static char* gAnrTraceDir = nullptr;
 const static char* gStackTraceDir = nullptr;
 
+long get_time_millis() {
+    struct timeval tv{};
+    gettimeofday(&tv, nullptr);
+    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
 bool isNumberStr(char *str, int maxLen) {
     for (int i = 0; i < maxLen; i ++) {
         char c = str[i];
@@ -130,8 +136,14 @@ ssize_t my_write(int fd, const void *const buf, size_t count) {
     if (gSignalCatcherTid == gettid()) {
         bytehook_unhook(gWriteStub);
         gWriteStub = nullptr;
-
         LOGD("SignalCatcher write count: %d", count);
+        long time = get_time_millis();
+        char * stackFileName = new char[MAX_BUFFER_SIZE];
+        sprintf(stackFileName, "%s/%ld.text", gStackTraceDir, time);
+        LOGD("Create stack file: %s", stackFileName);
+        FILE *file = fopen(stackFileName, "w");
+        fwrite(buf, 1, count, file);
+        fclose(file);
     }
     return origin_write(fd, buf, count);
 }
