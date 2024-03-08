@@ -6,7 +6,7 @@
 #include "dumpstack.h"
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_tans_dumpstack_DumpStack_setDirs(
+Java_com_tans_dumpstack_DumpStack_setDirsNative(
         JNIEnv* env,
         jobject /* this */,
         jstring anrTraceDir,
@@ -16,5 +16,12 @@ Java_com_tans_dumpstack_DumpStack_setDirs(
             env->GetStringUTFLength(anrTraceDir),
             (const char *)env->GetStringUTFChars(stackTraceDir, &copy),
             env->GetStringUTFLength(stackTraceDir));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_tans_dumpstack_DumpStack_obtainCurrentStacksNative(
+        JNIEnv* env,
+        jobject /* this */) {
+    obtainCurrentStacks();
 }
 

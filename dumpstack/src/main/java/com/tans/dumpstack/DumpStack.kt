@@ -36,16 +36,25 @@ object DumpStack {
             }
             DumpStackLog.d("AnrTraceDir: ${anrTraceDir.canonicalPath}, StackTraceDir: ${stackTraceDir.canonicalPath}")
             System.loadLibrary("dumpstack")
-            setDirs(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
+            setDirsNative(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
             val byteHookResult = ByteHook.init()
             DumpStackLog.d("ByteHook init result: $byteHookResult")
         } else {
             DumpStackLog.e("Already invoke init.")
         }
+    }
 
+    fun obtainCurrentStacks() {
+        if (isInit.get()) {
+            obtainCurrentStacksNative()
+        } else {
+            DumpStackLog.e("ObtainCurrentStacks error, not init.")
+        }
     }
 
     @Keep
-    private external fun setDirs(anrTraceDir: String, stackTraceDir: String)
+    private external fun setDirsNative(anrTraceDir: String, stackTraceDir: String)
 
+    @Keep
+    private external fun obtainCurrentStacksNative()
 }

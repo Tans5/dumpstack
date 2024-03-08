@@ -7,4 +7,6 @@
 
 void setDirs(const char* anrTraceDir, int anrTraceDirLength, const char* stackTraceDir, int stackTraceDirLength);
 
+void obtainCurrentStacks();
+
 #endif //DUMPSTACK_DUMPSTACK_H

@@ -2,6 +2,7 @@ package com.tans.dumpstack.demo
 
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
+import com.tans.dumpstack.DumpStack
 import com.tans.dumpstack.demo.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
@@ -13,5 +14,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(binding.root)
+        binding.obtainStacksBt.setOnClickListener {
+            DumpStack.obtainCurrentStacks()
+        }
     }
 }
