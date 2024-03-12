@@ -7,6 +7,6 @@ class MyApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        DumpStack.init(this)
+        DumpStack.init(this, true)
     }
 }

@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/eventfd.h>
 #include "dumpstack.h"
 #include "android_log.h"
 #include "bytehook.h"
@@ -35,6 +36,8 @@ bool isNumberStr(char *str, int maxLen) {
     }
     return true;
 }
+
+static int gSignalCatcherTid = -1;
 
 int getSignalCatcherTid() {
     pid_t myPid = getpid();
@@ -75,10 +78,38 @@ int getSignalCatcherTid() {
     return - 1;
 }
 
+static int stackNotifyFd = -1;
+
+void* stackHandleRoutine(void* args) {
+    JavaVM *jvm = (JavaVM *) args;
+    JavaVMAttachArgs jvmAttachArgs {
+            .version = JNI_VERSION_1_6,
+            .name = "CrashHandleThread",
+            .group = nullptr
+    };
+    JNIEnv *jniEnv;
+    int ret = jvm->AttachCurrentThread(&jniEnv, &jvmAttachArgs);
+    if (ret == 0) {
+        long data;
+        while (true) {
+            read(stackNotifyFd, &data, sizeof(data));
+            if (data == 233L) {
+                // Notify stack.
+                LOGD("New stack...");
+                // TODO:
+            }
+        }
+    } else {
+        LOGE("Attach thread to Jvm fail: %d", ret);
+    }
+    return nullptr;
+}
+
 void setDirs(const char* anrTraceDir,
              int anrTraceDirLength,
              const char* stackTraceDir,
-             int stackTraceDirLength) {
+             int stackTraceDirLength,
+             JavaVM *jvm) {
     if (gAnrTraceDir != nullptr) {
         free((void *)gAnrTraceDir);
     }
@@ -92,46 +123,25 @@ void setDirs(const char* anrTraceDir,
     gAnrTraceDir = (const char *) anrTraceDirLocal;
     gStackTraceDir = (const char *) stackTrackLocal;
     LOGD("AnrTraceDir: %s, StackTraceDir: %s", anrTraceDir, stackTraceDir);
-}
 
-static int gSignalCatcherTid = -1;
-
-// connect hook.
-int (*origin_connect)(int __fd, const struct sockaddr *__addr, socklen_t __addr_length);
-bytehook_stub_t gConnectStub = nullptr;
-int my_connect(int __fd, const struct sockaddr *__addr, socklen_t __addr_length) {
-    LOGD("Hook signal catcher, path: %s", __addr->sa_data);
-    return origin_connect(__fd, __addr, __addr_length);
-}
-void my_connect_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
-                         const char *sym_name, void *new_func, void *prev_func, void *arg) {
-    gConnectStub = task_stub;
-    if (prev_func != nullptr) {
-        origin_connect = reinterpret_cast<int (*)(int __fd, const struct sockaddr *__addr, socklen_t __addr_length)>(prev_func);
+    stackNotifyFd = eventfd(0, EFD_CLOEXEC);
+    if (stackNotifyFd > 0) {
+        pthread_t stackHandleThread;
+        int ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, jvm);
+        LOGD("Create stack handle thread: %ld, result: %d", stackHandleThread, ret);
+    } else {
+        LOGE("Create stack notify fd fail.");
     }
-    LOGD("Hook connect method result: %d", status_code);
 }
 
-
-// open hook.
-int (*origin_open)(const char* pathname, int flags, mode_t mode);
-bytehook_stub_t gOpenStub = nullptr;
-int my_open(const char *pathname, int flags, mode_t mode) {
-    return origin_open(pathname, flags, mode);
+void monitorAnr() {
+    // TODO:
 }
-void my_open_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
-                              const char *sym_name, void *new_func, void *prev_func, void *arg) {
-    gOpenStub = task_stub;
-    if (prev_func != nullptr) {
-        origin_open = reinterpret_cast<int (*)(const char* pathname, int flags, mode_t mode)>(prev_func);
-    }
-    LOGD("Hook open method result: %d", status_code);
-}
-
 
 // write hook.
 ssize_t (*origin_write)(int fd, const void *const buf, size_t count);
 bytehook_stub_t gWriteStub = nullptr;
+static bool waitingWriteStackFileFromAnr = false;
 ssize_t my_write(int fd, const void *const buf, size_t count) {
     if (gSignalCatcherTid == gettid()) {
         bytehook_unhook(gWriteStub);
@@ -139,11 +149,21 @@ ssize_t my_write(int fd, const void *const buf, size_t count) {
         LOGD("SignalCatcher write count: %d", count);
         long time = get_time_millis();
         char * stackFileName = new char[MAX_BUFFER_SIZE];
-        sprintf(stackFileName, "%s/%ld.text", gStackTraceDir, time);
+        const char * dir;
+        if (waitingWriteStackFileFromAnr) {
+            dir = gAnrTraceDir;
+        } else {
+            dir = gStackTraceDir;
+        }
+        sprintf(stackFileName, "%s/%ld.text", dir, time);
         LOGD("Create stack file: %s", stackFileName);
         FILE *file = fopen(stackFileName, "w");
         fwrite(buf, 1, count, file);
         fclose(file);
+        if (stackNotifyFd > 0) {
+            long data = 233L;
+            write(stackNotifyFd, &data, sizeof(data));
+        }
     }
     return origin_write(fd, buf, count);
 }
@@ -156,7 +176,7 @@ void my_write_hook_callback(bytehook_stub_t task_stub, int status_code, const ch
     LOGD("Hook write method result: %d", status_code);
 }
 
-void obtainCurrentStacks() {
+void obtainCurrentStacks(bool fromAnr) {
     int apiLevel = android_get_device_api_level();
     int signalCatcherTid = getSignalCatcherTid();
     gSignalCatcherTid = signalCatcherTid;
@@ -165,33 +185,6 @@ void obtainCurrentStacks() {
         LOGE("Get Signal Catcher tid fail.");
         return;
     }
-//    if (apiLevel >= 27) {
-//        if (gConnectStub != nullptr) {
-//            bytehook_unhook(gConnectStub);
-//            gConnectStub = nullptr;
-//        }
-//        bytehook_hook_single(
-//                "libcutils.so",
-//                nullptr,
-//                "connect",
-//                (void *)my_connect,
-//                my_connect_hook_callback,
-//                nullptr
-//        );
-//    } else {
-//        if (gOpenStub != nullptr) {
-//            bytehook_unhook(gOpenStub);
-//            gConnectStub = nullptr;
-//        }
-//        bytehook_hook_single(
-//                "libart.so",
-//                nullptr,
-//                "open",
-//                (void *)my_open,
-//                my_open_hook_callback,
-//                nullptr
-//                );
-//    }
 
     if (gWriteStub != nullptr) {
         bytehook_unhook(gWriteStub);
@@ -212,5 +205,8 @@ void obtainCurrentStacks() {
             (void *)my_write,
             my_write_hook_callback,
             nullptr);
-    kill(getpid(), SIGQUIT);
+    waitingWriteStackFileFromAnr = fromAnr;
+    if (!fromAnr) {
+        kill(getpid(), SIGQUIT);
+    }
 }
