@@ -5,10 +5,10 @@
 #ifndef DUMPSTACK_DUMPSTACK_H
 #define DUMPSTACK_DUMPSTACK_H
 
-void setDirs(const char* anrTraceDir, int anrTraceDirLength, const char* stackTraceDir, int stackTraceDirLength, JavaVM* jvm);
+int initDumpStack(const char* anrTraceDir, int anrTraceDirLength, const char* stackTraceDir, int stackTraceDirLength, JavaVM* jvm);
 
-void monitorAnr();
+int monitorAnr();
 
-void obtainCurrentStacks(bool fromAnr);
+int obtainCurrentStacks();
 
 #endif //DUMPSTACK_DUMPSTACK_H

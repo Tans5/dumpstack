@@ -4,81 +4,19 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <sys/socket.h>
 #include <sys/eventfd.h>
 #include "dumpstack.h"
 #include "android_log.h"
-#include "bytehook.h"
-
-// 8 KB
-#define MAX_BUFFER_SIZE 1024 * 8
+#include "xhook.h"
+#include "utils.h"
 
 const static char* gAnrTraceDir = nullptr;
 const static char* gStackTraceDir = nullptr;
-
-long get_time_millis() {
-    struct timeval tv{};
-    gettimeofday(&tv, nullptr);
-    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
-}
-
-bool isNumberStr(char *str, int maxLen) {
-    for (int i = 0; i < maxLen; i ++) {
-        char c = str[i];
-        if (c == '\0') {
-            break;
-        }
-        if (c >= '0' && c <= '9') {
-            continue;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
-
 static int gSignalCatcherTid = -1;
-
-int getSignalCatcherTid() {
-    pid_t myPid = getpid();
-    char *processPath = new char[MAX_BUFFER_SIZE];
-    int size = sprintf(processPath, "/proc/%d/task", myPid);
-    if (size >= MAX_BUFFER_SIZE) {
-        LOGE("Read proc path fail, read buffer size: %d", size);
-        return -1;
-    }
-    DIR *processDir = opendir(processPath);
-    if (processDir) {
-        int tid = -1;
-        dirent * child = readdir(processDir);
-        while (child != nullptr) {
-            if (isNumberStr(child->d_name, 256)) {
-                char *filePath = new char[MAX_BUFFER_SIZE];
-                size = sprintf(filePath, "%s/%s/comm", processPath, child->d_name);
-                if (size >= MAX_BUFFER_SIZE) {
-                    continue;
-                }
-                char *threadName = new char[MAX_BUFFER_SIZE];
-                int fd = open(filePath, O_RDONLY);
-                size = read(fd, threadName, MAX_BUFFER_SIZE);
-                close(fd);
-                threadName[size - 1] = '\0';
-                if (strcmp(threadName, "Signal Catcher") == 0) {
-                    tid = atoi(child->d_name);
-                    break;
-                }
-            }
-            child = readdir(processDir);
-        }
-        closedir(processDir);
-        return tid;
-    } else {
-        LOGE("Read process dir fail.");
-    }
-    return - 1;
-}
-
-static int stackNotifyFd = -1;
+static int gStackNotifyFd = -1;
+static bool isInited = false;
+static pthread_mutex_t *lock = nullptr;
+static bool isMonitorAnrSig = false;
 
 void* stackHandleRoutine(void* args) {
     JavaVM *jvm = (JavaVM *) args;
@@ -92,7 +30,7 @@ void* stackHandleRoutine(void* args) {
     if (ret == 0) {
         long data;
         while (true) {
-            read(stackNotifyFd, &data, sizeof(data));
+            read(gStackNotifyFd, &data, sizeof(data));
             if (data == 233L) {
                 // Notify stack.
                 LOGD("New stack...");
@@ -105,45 +43,35 @@ void* stackHandleRoutine(void* args) {
     return nullptr;
 }
 
-// write hook.
 ssize_t (*origin_write)(int fd, const void *const buf, size_t count);
-bytehook_stub_t gWriteStub = nullptr;
-static bool waitingWriteStackFileFromAnr = false;
+
 ssize_t my_write(int fd, const void *const buf, size_t count) {
     if (gSignalCatcherTid == gettid()) {
 //        bytehook_unhook(gWriteStub);
 //        gWriteStub = nullptr;
         LOGD("SignalCatcher write count: %d", count);
-        long time = get_time_millis();
-        char * stackFileName = new char[MAX_BUFFER_SIZE];
-        const char * dir;
-        if (waitingWriteStackFileFromAnr) {
-            dir = gAnrTraceDir;
-        } else {
-            dir = gStackTraceDir;
-        }
-        sprintf(stackFileName, "%s/%ld.text", dir, time);
-        LOGD("Create stack file: %s", stackFileName);
-        FILE *file = fopen(stackFileName, "w");
-        fwrite(buf, 1, count, file);
-        fclose(file);
-        if (stackNotifyFd > 0) {
-            long data = 233L;
-            write(stackNotifyFd, &data, sizeof(data));
-        }
+//        long time = get_time_millis();
+//        char * stackFileName = new char[MAX_BUFFER_SIZE];
+//        const char * dir;
+//        if (waitingWriteStackFileFromAnr) {
+//            dir = gAnrTraceDir;
+//        } else {
+//            dir = gStackTraceDir;
+//        }
+//        sprintf(stackFileName, "%s/%ld.text", dir, time);
+//        LOGD("Create stack file: %s", stackFileName);
+//        FILE *file = fopen(stackFileName, "w");
+//        fwrite(buf, 1, count, file);
+//        fclose(file);
+//        if (gStackNotifyFd > 0) {
+//            long data = 233L;
+//            write(gStackNotifyFd, &data, sizeof(data));
+//        }
     }
     return origin_write(fd, buf, count);
 }
-void my_write_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
-                            const char *sym_name, void *new_func, void *prev_func, void *arg) {
-//    gWriteStub = task_stub;
-    if (prev_func != nullptr) {
-        origin_write = reinterpret_cast<ssize_t (*)(int fd, const void *const buf, size_t count)>(prev_func);
-    }
-    LOGD("Hook write method result: %d", status_code);
-}
 
-void hookSignalCatcherWrite() {
+int hookSignalCatcherWrite() {
     int apiLevel = android_get_device_api_level();
     int signalCatcherTid = gSignalCatcherTid;
     if (signalCatcherTid <= 0) {
@@ -153,35 +81,49 @@ void hookSignalCatcherWrite() {
     LOGD("ApiLevel: %d, SignalCatcherTid: %d", apiLevel, signalCatcherTid);
     if (signalCatcherTid <= 0) {
         LOGE("Get Signal Catcher tid fail.");
-        return;
-    }
-
-    if (gWriteStub != nullptr) {
-        bytehook_unhook(gWriteStub);
-        gWriteStub = nullptr;
+        return -1;
     }
     char *writeLibName;
     if (apiLevel >= 30 || apiLevel == 25 || apiLevel == 24) {
-        writeLibName = "libc.so";
+        writeLibName = ".*/libc\\.so$";
     } else if (apiLevel == 29) {
-        writeLibName = "libbase.so";
+        writeLibName = ".*/libbase\\.so$";
     } else {
-        writeLibName = "libart.so";
+        writeLibName = ".*/libart\\.so$";
     }
-    gWriteStub = bytehook_hook_single(
-            writeLibName,
-            nullptr,
-            "write",
-            (void *)my_write,
-            my_write_hook_callback,
-            nullptr);
+    int ret = xhook_register(writeLibName,
+                   "write",
+                   (void *) my_write,
+                             nullptr);
+    LOGD("xhook hook write register result: %d", ret);
+    if (ret == 0) {
+        ret = xhook_refresh(1);
+        LOGD("xhook hook write refresh result: %d", ret);
+        return ret;
+    } else {
+        return ret;
+    }
 }
 
-void setDirs(const char* anrTraceDir,
-             int anrTraceDirLength,
-             const char* stackTraceDir,
-             int stackTraceDirLength,
-             JavaVM *jvm) {
+int initDumpStack(const char* anrTraceDir,
+                   int anrTraceDirLength,
+                   const char* stackTraceDir,
+                   int stackTraceDirLength,
+                   JavaVM *jvm) {
+    if (lock == nullptr) {
+        pthread_mutex_t *llock = new pthread_mutex_t;
+        pthread_mutex_init(llock, nullptr);
+        lock = llock;
+    }
+    pthread_mutex_lock(lock);
+    int ret = 0;
+
+    if (isInited) {
+        ret = -1;
+        pthread_mutex_unlock(lock);
+        return ret;
+    }
+
     if (gAnrTraceDir != nullptr) {
         free((void *)gAnrTraceDir);
     }
@@ -196,28 +138,80 @@ void setDirs(const char* anrTraceDir,
     gStackTraceDir = (const char *) stackTrackLocal;
     LOGD("AnrTraceDir: %s, StackTraceDir: %s", anrTraceDir, stackTraceDir);
 
-    hookSignalCatcherWrite();
-
-    stackNotifyFd = eventfd(0, EFD_CLOEXEC);
-    if (stackNotifyFd > 0) {
-        pthread_t stackHandleThread;
-        int ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, jvm);
-        LOGD("Create stack handle thread: %ld, result: %d", stackHandleThread, ret);
+    origin_write = write;
+    ret = hookSignalCatcherWrite();
+    if (ret == 0) {
+        gStackNotifyFd = eventfd(0, EFD_CLOEXEC);
+        if (gStackNotifyFd > 0) {
+            pthread_t stackHandleThread;
+            ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, jvm);
+            LOGD("Create stack handle thread: %ld, result: %d", stackHandleThread, ret);
+            isInited = (ret == 0);
+            goto end;
+        } else {
+            LOGE("Create stack notify fd fail.");
+            goto end;
+        }
     } else {
-        LOGE("Create stack notify fd fail.");
+        goto end;
+    }
+
+    end:
+        pthread_mutex_unlock(lock);
+        return ret;
+}
+
+int monitorAnr() {
+    if (lock != nullptr) {
+        pthread_mutex_lock(lock);
+        int ret;
+        if (isInited) {
+            if (!isMonitorAnrSig) {
+                // TODO:
+
+                ret = 0;
+                isMonitorAnrSig = true;
+            } else {
+                LOGE("Do not invoke monitor anr multiple times.");
+                ret = -1;
+            }
+            goto end;
+        } else {
+            ret = -1;
+            LOGE("Not init.");
+            goto end;
+        }
+
+        end:
+           pthread_mutex_unlock(lock);
+           return ret;
+    } else {
+        LOGE("Not init.");
+        return -1;
     }
 }
 
-void monitorAnr() {
-    // TODO:
-}
 
 
+int obtainCurrentStacks() {
+    if (lock != nullptr) {
+        pthread_mutex_lock(lock);
+        int ret;
+        if (isInited) {
+            // TODO:
 
-void obtainCurrentStacks(bool fromAnr) {
-
-    waitingWriteStackFileFromAnr = fromAnr;
-    if (!fromAnr) {
-        kill(getpid(), SIGQUIT);
+            kill(getpid(), SIGQUIT);
+            ret = 0;
+            goto end;
+        } else {
+            ret = -1;
+            goto end;
+        }
+        end:
+           pthread_mutex_unlock(lock);
+           return ret;
+    } else {
+        LOGE("Not init.");
+        return -1;
     }
 }

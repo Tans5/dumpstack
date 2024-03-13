@@ -12,11 +12,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
-//        externalNativeBuild {
-//            cmake {
-//                cppFlags("")
-//            }
-//        }
     }
 
     buildTypes {
@@ -42,14 +37,6 @@ android {
     kotlinOptions {
         jvmTarget = "1.8"
     }
-
-    buildFeatures {
-        prefab = true
-    }
-
-    packaging {
-        jniLibs.excludes.add("**/libbytehook.so")
-    }
 }
 
 dependencies {
@@ -61,7 +48,4 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-
-    // mine
-    implementation("com.bytedance:bytehook:1.0.8")
 }

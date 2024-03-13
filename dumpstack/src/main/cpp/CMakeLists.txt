@@ -8,12 +8,13 @@ cmake_minimum_required(VERSION 3.22.1)
 project("dumpstack")
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        bytehook/bytehook.h
         dumpstack/dumpstack.cpp
         dumpstack/dumpstack.h
         dumpstack/android_log.h
         dumpstack/jni.cpp
-        xhook/xhook.h)
+        dumpstack/xhook.h
+        dumpstack/utils.h
+        dumpstack/utils.cpp)
 
 add_library(xhook SHARED
         xhook/queue.h
@@ -37,12 +38,8 @@ target_link_libraries(xhook
         android
         log)
 
-# bytehook
-find_package(bytehook REQUIRED CONFIG)
-
 target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         log
-        bytehook::bytehook
         xhook
 )

@@ -3,7 +3,6 @@ package com.tans.dumpstack
 import android.content.Context
 import android.os.SystemClock
 import androidx.annotation.Keep
-import com.bytedance.android.bytehook.ByteHook
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -38,13 +37,18 @@ object DumpStack {
                 stackTraceDir.mkdirs()
             }
             DumpStackLog.d("AnrTraceDir: ${anrTraceDir.canonicalPath}, StackTraceDir: ${stackTraceDir.canonicalPath}")
-            val byteHookResult = ByteHook.init()
-            DumpStackLog.d("ByteHook init result: $byteHookResult")
             System.loadLibrary("dumpstack")
-            setDirsNative(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
-            if (monitorAnr) {
-                DumpStackLog.d("Monitor anr.")
-                monitorAnrNative()
+            var result = initDumpStackNative(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
+            if (result == 0) {
+                if (monitorAnr) {
+                    DumpStackLog.d("Monitor anr.")
+                    result = monitorAnrNative()
+                    if (result != 0) {
+                        DumpStackLog.e("Monitor anr fail.")
+                    }
+                }
+            } else {
+                DumpStackLog.e("Init dump stack fail: $result")
             }
         } else {
             DumpStackLog.e("Already invoke init.")
@@ -55,9 +59,9 @@ object DumpStack {
             val now = SystemClock.uptimeMillis()
             val last = lastObtainStackTime.get()
             if ((now - last) > MIN_OBTAIN_STACK_INTERVAL) {
-                synchronized(this) {
-                    lastObtainStackTime.set(now)
-                    obtainCurrentStacksNative()
+                lastObtainStackTime.set(now)
+                if (obtainCurrentStacksNative() != 0) {
+                    DumpStackLog.e("Obtain current stacks fail.")
                 }
             } else {
                 DumpStackLog.e("Skip get stack, min interval is ${MIN_OBTAIN_STACK_INTERVAL}ms")
@@ -68,13 +72,13 @@ object DumpStack {
     }
 
     @Keep
-    private external fun setDirsNative(anrTraceDir: String, stackTraceDir: String)
+    private external fun initDumpStackNative(anrTraceDir: String, stackTraceDir: String): Int
 
     @Keep
-    private external fun monitorAnrNative()
+    private external fun monitorAnrNative(): Int
 
     @Keep
-    private external fun obtainCurrentStacksNative()
+    private external fun obtainCurrentStacksNative(): Int
 
     private const val MIN_OBTAIN_STACK_INTERVAL = 1000L
 }
