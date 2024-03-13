@@ -4,13 +4,31 @@ import android.content.Context
 import android.os.SystemClock
 import androidx.annotation.Keep
 import java.io.File
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+@Keep
 object DumpStack {
+
+    private val dispatchExecutor: Executor by lazy {
+        Executors.newSingleThreadExecutor { r ->
+            val t = Thread(r, "DumpStack-Dispatcher")
+            t
+        }
+    }
+
+    private val dumpStackListeners: LinkedBlockingDeque<DumpStackListener> by lazy {
+        LinkedBlockingDeque()
+    }
 
     private val isInit: AtomicBoolean = AtomicBoolean(false)
     private val lastObtainStackTime: AtomicLong = AtomicLong()
+
+    private var anrTraceDir: File? = null
+    private var stackTraceDir: File? = null
 
     fun init(context: Context, monitorAnr: Boolean) {
         val cacheDir = context.cacheDir
@@ -36,6 +54,8 @@ object DumpStack {
             if (!stackTraceDir.isDirectory) {
                 stackTraceDir.mkdirs()
             }
+            this.anrTraceDir = anrTraceDir
+            this.stackTraceDir = stackTraceDir
             DumpStackLog.d("AnrTraceDir: ${anrTraceDir.canonicalPath}, StackTraceDir: ${stackTraceDir.canonicalPath}")
             System.loadLibrary("dumpstack")
             var result = initDumpStackNative(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
@@ -71,14 +91,55 @@ object DumpStack {
         }
     }
 
-    @Keep
+    fun addStackListener(l: DumpStackListener) {
+        if (!dumpStackListeners.contains(l)) {
+            dumpStackListeners.add(l)
+        }
+    }
+
+    fun removeStackListener(l: DumpStackListener) {
+        dumpStackListeners.remove(l)
+    }
+
     private external fun initDumpStackNative(anrTraceDir: String, stackTraceDir: String): Int
 
-    @Keep
     private external fun monitorAnrNative(): Int
 
-    @Keep
     private external fun obtainCurrentStacksNative(): Int
 
     private const val MIN_OBTAIN_STACK_INTERVAL = 1000L
+
+    /**
+     * For native call.
+     */
+    @JvmStatic
+    fun stackCallback(timestamp: Long, isAnr: Boolean) {
+        val dir: File? = if (isAnr) {
+            anrTraceDir
+        } else {
+            stackTraceDir
+        }
+        if (dir == null) {
+            DumpStackLog.e("Dir is null, can't handle stack callback.")
+            return
+        }
+        val file = File(dir, "${timestamp}.text")
+        if (!file.isFile) {
+            DumpStackLog.e("Wrong stack file: ${file.canonicalPath}")
+            return
+        }
+        dispatchStack(timestamp, isAnr, file)
+    }
+
+    private fun dispatchStack(timestamp: Long, isAnr: Boolean, f: File) {
+        dispatchExecutor.execute {
+            for (l in dumpStackListeners) {
+                if (isAnr) {
+                    l.onAnr(timestamp, f)
+                } else {
+                    l.onStackRequest(timestamp, f)
+                }
+            }
+        }
+    }
 }

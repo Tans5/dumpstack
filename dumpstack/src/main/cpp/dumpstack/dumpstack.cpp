@@ -30,14 +30,19 @@ enum DumpStackState {
 static DumpStackState dumpState = NO_DUMP;
 
 void* stackHandleRoutine(void* args) {
-    JavaVM *jvm = (JavaVM *) args;
+    DumpStackParams *params = (DumpStackParams *) args;
     JavaVMAttachArgs jvmAttachArgs {
             .version = JNI_VERSION_1_6,
             .name = "StackHandleThread",
             .group = nullptr
     };
+    JavaVM *jvm = params->jvm;
+    auto callback = params->stackCallback;
     JNIEnv *jniEnv;
     int ret = jvm->AttachCurrentThread(&jniEnv, &jvmAttachArgs);
+    params->jvm = nullptr;
+    params->stackCallback = nullptr;
+    free(params);
     if (ret == 0) {
         long data;
         while (true) {
@@ -45,10 +50,8 @@ void* stackHandleRoutine(void* args) {
             if (data > 0L) {
                 pthread_mutex_lock(lock);
                 // Notify stack.
-                LOGD("New stack...");
-                // TODO:
+                callback(jniEnv, data, dumpState == WAITING_ANR_DUMP);
                 goto end;
-
                 end:
                     dumpState = NO_DUMP;
                     pthread_mutex_unlock(lock);
@@ -135,7 +138,8 @@ int initDumpStack(const char* anrTraceDir,
                    int anrTraceDirLength,
                    const char* stackTraceDir,
                    int stackTraceDirLength,
-                   JavaVM *jvm) {
+                  JavaVM *jvm,
+                  void (*stackCallback)(JNIEnv* jni, long timestamp, bool isAnr)) {
     if (lock == nullptr) {
         pthread_mutex_t *llock = new pthread_mutex_t;
         pthread_mutex_init(llock, nullptr);
@@ -170,7 +174,10 @@ int initDumpStack(const char* anrTraceDir,
         gStackNotifyFd = eventfd(0, EFD_CLOEXEC);
         if (gStackNotifyFd > 0) {
             pthread_t stackHandleThread;
-            ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, jvm);
+            DumpStackParams* params = new DumpStackParams;
+            params->jvm = jvm;
+            params->stackCallback = stackCallback;
+            ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, params);
             LOGD("Create stack handle thread: %ld, result: %d", stackHandleThread, ret);
             isInited = (ret == 0);
             goto end;
