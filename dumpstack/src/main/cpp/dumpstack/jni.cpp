@@ -6,11 +6,11 @@
 #include "android_log.h"
 #include "dumpstack.h"
 
+static jclass gJavaClass = nullptr;
+static jmethodID gStackCallbackMethodId = nullptr;
 void stackCallback(JNIEnv *jni, long timestamp, bool isAnr) {
     LOGD("Callback receive stack.");
-    auto javaClass = jni->FindClass("com/tans/dumpstack/DumpStack");
-    auto methodId = jni->GetStaticMethodID(javaClass, "stackCallback", "(JZ)V");
-    jni->CallStaticVoidMethod(javaClass, methodId, (jlong)timestamp, (jboolean)isAnr);
+    jni->CallStaticVoidMethod(gJavaClass, gStackCallbackMethodId, (jlong)timestamp, (jboolean)isAnr);
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -43,5 +43,16 @@ Java_com_tans_dumpstack_DumpStack_obtainCurrentStacksNative(
         JNIEnv* env,
         jobject /* this */) {
     return obtainCurrentStacks();
+}
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved) {
+    LOGD("Jni load.");
+    JNIEnv *jni;
+    jvm->GetEnv((void **)&jni, JNI_VERSION_1_6);
+    auto javaClass = jni->FindClass("com/tans/dumpstack/DumpStack");
+    gJavaClass = static_cast<jclass>(jni->NewGlobalRef(javaClass));
+    auto methodId = jni->GetStaticMethodID(javaClass, "stackCallback", "(JZ)V");
+    gStackCallbackMethodId = methodId;
+    return JNI_VERSION_1_6;
 }
 
