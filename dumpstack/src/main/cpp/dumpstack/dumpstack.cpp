@@ -5,10 +5,14 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
 #include "dumpstack.h"
 #include "android_log.h"
 #include "xhook.h"
 #include "utils.h"
+
+// 8 KB
+#define MAX_BUFFER_SIZE 1024 * 8
 
 const static char* gAnrTraceDir = nullptr;
 const static char* gStackTraceDir = nullptr;
@@ -18,11 +22,18 @@ static bool isInited = false;
 static pthread_mutex_t *lock = nullptr;
 static bool isMonitorAnrSig = false;
 
+enum DumpStackState {
+    NO_DUMP,
+    WAITING_STACK_DUMP,
+    WAITING_ANR_DUMP
+};
+static DumpStackState dumpState = NO_DUMP;
+
 void* stackHandleRoutine(void* args) {
     JavaVM *jvm = (JavaVM *) args;
     JavaVMAttachArgs jvmAttachArgs {
             .version = JNI_VERSION_1_6,
-            .name = "CrashHandleThread",
+            .name = "StackHandleThread",
             .group = nullptr
     };
     JNIEnv *jniEnv;
@@ -31,10 +42,16 @@ void* stackHandleRoutine(void* args) {
         long data;
         while (true) {
             read(gStackNotifyFd, &data, sizeof(data));
-            if (data == 233L) {
+            if (data > 0L) {
+                pthread_mutex_lock(lock);
                 // Notify stack.
                 LOGD("New stack...");
                 // TODO:
+                goto end;
+
+                end:
+                    dumpState = NO_DUMP;
+                    pthread_mutex_unlock(lock);
             }
         }
     } else {
@@ -47,26 +64,35 @@ ssize_t (*origin_write)(int fd, const void *const buf, size_t count);
 
 ssize_t my_write(int fd, const void *const buf, size_t count) {
     if (gSignalCatcherTid == gettid()) {
-//        bytehook_unhook(gWriteStub);
-//        gWriteStub = nullptr;
-        LOGD("SignalCatcher write count: %d", count);
-//        long time = get_time_millis();
-//        char * stackFileName = new char[MAX_BUFFER_SIZE];
-//        const char * dir;
-//        if (waitingWriteStackFileFromAnr) {
-//            dir = gAnrTraceDir;
-//        } else {
-//            dir = gStackTraceDir;
-//        }
-//        sprintf(stackFileName, "%s/%ld.text", dir, time);
-//        LOGD("Create stack file: %s", stackFileName);
-//        FILE *file = fopen(stackFileName, "w");
-//        fwrite(buf, 1, count, file);
-//        fclose(file);
-//        if (gStackNotifyFd > 0) {
-//            long data = 233L;
-//            write(gStackNotifyFd, &data, sizeof(data));
-//        }
+        pthread_mutex_lock(lock);
+        if (dumpState != NO_DUMP) {
+            LOGD("SignalCatcher write count: %d", count);
+            long time = get_time_millis();
+            char *stackFileName = new char[MAX_BUFFER_SIZE];
+            const char * dir;
+            if (dumpState == WAITING_STACK_DUMP) {
+                dir = gStackTraceDir;
+                LOGD("Start stack dump.");
+            } else {
+                dir = gAnrTraceDir;
+                LOGD("Start anr dump.");
+            }
+            sprintf(stackFileName, "%s/%ld.text", dir, time);
+            LOGD("Create stack file: %s", stackFileName);
+            int fileFd = open(stackFileName, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+            if (fileFd < 0) {
+                LOGE("Create file fail: %d", fd);
+                goto end;
+            }
+            write(fileFd, buf, count);
+            close(fileFd);
+            write(gStackNotifyFd, &time, sizeof(time));
+            goto end;
+        } else {
+            goto end;
+        }
+       end:
+        pthread_mutex_unlock(lock);
     }
     return origin_write(fd, buf, count);
 }
@@ -161,15 +187,44 @@ int initDumpStack(const char* anrTraceDir,
         return ret;
 }
 
+static void anrSignalHandler(int sig, siginfo_t *sig_info, void *uc) {
+    LOGD("Receive anr signal.");
+    int fromPid1 = sig_info->_si_pad[3];
+    int fromPid2 = sig_info->_si_pad[4];
+    int myPid = getpid();
+    if (fromPid1 != myPid && fromPid2 != myPid) {
+        pthread_mutex_lock(lock);
+        if (dumpState == NO_DUMP) {
+            dumpState = WAITING_ANR_DUMP;
+        } else {
+            LOGE("Skip dump anr, because state: %d", dumpState);
+        }
+        pthread_mutex_unlock(lock);
+    }
+    syscall(SYS_tgkill, myPid, gSignalCatcherTid, SIGQUIT);
+}
+
 int monitorAnr() {
     if (lock != nullptr) {
         pthread_mutex_lock(lock);
         int ret;
         if (isInited) {
             if (!isMonitorAnrSig) {
-                // TODO:
+                sigset_t sig_sets;
+                sigemptyset(&sig_sets);
+                sigaddset(&sig_sets, SIGQUIT);
+                pthread_sigmask(SIG_UNBLOCK, &sig_sets, nullptr);
 
-                ret = 0;
+                struct sigaction sigAction{};
+                sigfillset(&sigAction.sa_mask);
+                sigAction.sa_flags = SA_RESTART | SA_ONSTACK | SA_SIGINFO;
+                sigAction.sa_sigaction = anrSignalHandler;
+                ret = sigaction(SIGQUIT, &sigAction, nullptr);
+                if (ret == 0) {
+                    LOGD("Monitor anr signal success.");
+                } else {
+                    LOGE("Monitor anr signal fail: %d", ret);
+                }
                 isMonitorAnrSig = true;
             } else {
                 LOGE("Do not invoke monitor anr multiple times.");
@@ -198,10 +253,14 @@ int obtainCurrentStacks() {
         pthread_mutex_lock(lock);
         int ret;
         if (isInited) {
-            // TODO:
-
-            kill(getpid(), SIGQUIT);
-            ret = 0;
+            if (dumpState == NO_DUMP) {
+                dumpState = WAITING_STACK_DUMP;
+                syscall(SYS_tgkill, getpid(), gSignalCatcherTid, SIGQUIT);
+                ret = 0;
+            } else {
+                LOGE("Contain no finish stack dump.");
+                ret = -1;
+            }
             goto end;
         } else {
             ret = -1;
