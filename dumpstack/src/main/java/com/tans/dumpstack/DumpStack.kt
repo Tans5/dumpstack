@@ -38,10 +38,10 @@ object DumpStack {
                 stackTraceDir.mkdirs()
             }
             DumpStackLog.d("AnrTraceDir: ${anrTraceDir.canonicalPath}, StackTraceDir: ${stackTraceDir.canonicalPath}")
-            System.loadLibrary("dumpstack")
-            setDirsNative(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
             val byteHookResult = ByteHook.init()
             DumpStackLog.d("ByteHook init result: $byteHookResult")
+            System.loadLibrary("dumpstack")
+            setDirsNative(anrTraceDir.canonicalPath, stackTraceDir.canonicalPath)
             if (monitorAnr) {
                 DumpStackLog.d("Monitor anr.")
                 monitorAnrNative()

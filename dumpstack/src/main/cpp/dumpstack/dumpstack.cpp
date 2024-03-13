@@ -105,47 +105,14 @@ void* stackHandleRoutine(void* args) {
     return nullptr;
 }
 
-void setDirs(const char* anrTraceDir,
-             int anrTraceDirLength,
-             const char* stackTraceDir,
-             int stackTraceDirLength,
-             JavaVM *jvm) {
-    if (gAnrTraceDir != nullptr) {
-        free((void *)gAnrTraceDir);
-    }
-    if (gStackTraceDir != nullptr) {
-        free((void *) gStackTraceDir);
-    }
-    void* anrTraceDirLocal = malloc(anrTraceDirLength + 1);
-    void* stackTrackLocal = malloc(stackTraceDirLength + 1);
-    memcpy(anrTraceDirLocal, anrTraceDir, anrTraceDirLength + 1);
-    memcpy(stackTrackLocal, stackTraceDir, stackTraceDirLength + 1);
-    gAnrTraceDir = (const char *) anrTraceDirLocal;
-    gStackTraceDir = (const char *) stackTrackLocal;
-    LOGD("AnrTraceDir: %s, StackTraceDir: %s", anrTraceDir, stackTraceDir);
-
-    stackNotifyFd = eventfd(0, EFD_CLOEXEC);
-    if (stackNotifyFd > 0) {
-        pthread_t stackHandleThread;
-        int ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, jvm);
-        LOGD("Create stack handle thread: %ld, result: %d", stackHandleThread, ret);
-    } else {
-        LOGE("Create stack notify fd fail.");
-    }
-}
-
-void monitorAnr() {
-    // TODO:
-}
-
 // write hook.
 ssize_t (*origin_write)(int fd, const void *const buf, size_t count);
 bytehook_stub_t gWriteStub = nullptr;
 static bool waitingWriteStackFileFromAnr = false;
 ssize_t my_write(int fd, const void *const buf, size_t count) {
     if (gSignalCatcherTid == gettid()) {
-        bytehook_unhook(gWriteStub);
-        gWriteStub = nullptr;
+//        bytehook_unhook(gWriteStub);
+//        gWriteStub = nullptr;
         LOGD("SignalCatcher write count: %d", count);
         long time = get_time_millis();
         char * stackFileName = new char[MAX_BUFFER_SIZE];
@@ -168,18 +135,21 @@ ssize_t my_write(int fd, const void *const buf, size_t count) {
     return origin_write(fd, buf, count);
 }
 void my_write_hook_callback(bytehook_stub_t task_stub, int status_code, const char *caller_path_name,
-                           const char *sym_name, void *new_func, void *prev_func, void *arg) {
-    gWriteStub = task_stub;
+                            const char *sym_name, void *new_func, void *prev_func, void *arg) {
+//    gWriteStub = task_stub;
     if (prev_func != nullptr) {
         origin_write = reinterpret_cast<ssize_t (*)(int fd, const void *const buf, size_t count)>(prev_func);
     }
     LOGD("Hook write method result: %d", status_code);
 }
 
-void obtainCurrentStacks(bool fromAnr) {
+void hookSignalCatcherWrite() {
     int apiLevel = android_get_device_api_level();
-    int signalCatcherTid = getSignalCatcherTid();
-    gSignalCatcherTid = signalCatcherTid;
+    int signalCatcherTid = gSignalCatcherTid;
+    if (signalCatcherTid <= 0) {
+        signalCatcherTid = getSignalCatcherTid();
+        gSignalCatcherTid = signalCatcherTid;
+    }
     LOGD("ApiLevel: %d, SignalCatcherTid: %d", apiLevel, signalCatcherTid);
     if (signalCatcherTid <= 0) {
         LOGE("Get Signal Catcher tid fail.");
@@ -198,13 +168,54 @@ void obtainCurrentStacks(bool fromAnr) {
     } else {
         writeLibName = "libart.so";
     }
-    bytehook_hook_single(
+    gWriteStub = bytehook_hook_single(
             writeLibName,
             nullptr,
             "write",
             (void *)my_write,
             my_write_hook_callback,
             nullptr);
+}
+
+void setDirs(const char* anrTraceDir,
+             int anrTraceDirLength,
+             const char* stackTraceDir,
+             int stackTraceDirLength,
+             JavaVM *jvm) {
+    if (gAnrTraceDir != nullptr) {
+        free((void *)gAnrTraceDir);
+    }
+    if (gStackTraceDir != nullptr) {
+        free((void *) gStackTraceDir);
+    }
+    void* anrTraceDirLocal = malloc(anrTraceDirLength + 1);
+    void* stackTrackLocal = malloc(stackTraceDirLength + 1);
+    memcpy(anrTraceDirLocal, anrTraceDir, anrTraceDirLength + 1);
+    memcpy(stackTrackLocal, stackTraceDir, stackTraceDirLength + 1);
+    gAnrTraceDir = (const char *) anrTraceDirLocal;
+    gStackTraceDir = (const char *) stackTrackLocal;
+    LOGD("AnrTraceDir: %s, StackTraceDir: %s", anrTraceDir, stackTraceDir);
+
+    hookSignalCatcherWrite();
+
+    stackNotifyFd = eventfd(0, EFD_CLOEXEC);
+    if (stackNotifyFd > 0) {
+        pthread_t stackHandleThread;
+        int ret = pthread_create(&stackHandleThread, nullptr, stackHandleRoutine, jvm);
+        LOGD("Create stack handle thread: %ld, result: %d", stackHandleThread, ret);
+    } else {
+        LOGE("Create stack notify fd fail.");
+    }
+}
+
+void monitorAnr() {
+    // TODO:
+}
+
+
+
+void obtainCurrentStacks(bool fromAnr) {
+
     waitingWriteStackFileFromAnr = fromAnr;
     if (!fromAnr) {
         kill(getpid(), SIGQUIT);
