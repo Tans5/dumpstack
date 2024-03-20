@@ -1,3 +1,11 @@
-install:
-  - FILE="-Dfile=libs/dumpstack.aar"
-  - mvn install:install-file $FILE -DgroupId=com.github.Tans5 -DartifactId=dumpstack -Dversion=1.0.2 -Dpackaging=aar -DgeneratePom=true
+#install:
+#  - FILE="-Dfile=libs/dumpstack.aar"
+#  - mvn install:install-file $FILE -DgroupId=com.github.Tans5 -DartifactId=dumpstack -Dversion=1.0.2 -Dpackaging=aar -DgeneratePom=true
+
+jdk:
+  - openjdk17
+before_install:
+  - sdk install java 17.0.0-tem
+  - sdk use java 17.0.0-tem
+  - sdk install maven
+  - mvn -v
