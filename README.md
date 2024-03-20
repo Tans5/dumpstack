@@ -27,7 +27,7 @@ Add dependency in module gradle file:
 ```Groovy
 depencencies {
     // ...
-    implementation "com.github.Tans5:dumpstack:1.0.0"
+    implementation "com.github.Tans5:dumpstack:${latest_version}"
     // ...
 }
 ```
@@ -62,7 +62,7 @@ DumpStack.addStackListener(object : DumpStackListener {
     }
 })
 ```
-If you want to get all thread stack, you could invoke blow method: 
+If you want to get all threads' stacks, you could invoke blow method: 
 
 ```Kotlin
 DumpStack.obtainCurrentStacks()
