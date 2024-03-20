@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/eventfd.h>
+#include <sys/epoll.h>
 #include <sys/syscall.h>
 #include "dumpstack.h"
 #include "android_log.h"
@@ -44,22 +45,39 @@ void* stackHandleRoutine(void* args) {
     params->stackCallback = nullptr;
     free(params);
     if (ret == 0) {
-        long data;
-        while (true) {
-            read(gStackNotifyFd, &data, sizeof(data));
-            if (data > 0L) {
-                pthread_mutex_lock(lock);
-                // Notify stack.
-                callback(jniEnv, data, dumpState == WAITING_ANR_DUMP);
-                goto end;
-                end:
+        int epollFd = epoll_create(1);
+        if (epollFd > 0) {
+            struct epoll_event epollEvent;
+            memset(&epollEvent, 0, sizeof(epollEvent));
+            epollEvent.events = EPOLLIN; // Can read.
+            epollEvent.data.fd = gStackNotifyFd;
+            epoll_ctl(epollFd, EPOLL_CTL_ADD, gStackNotifyFd, &epollEvent);
+
+            long data;
+            while (true) {
+                // wait infinity
+                int eventCount = epoll_wait(epollFd, &epollEvent, 1, -1);
+                if (eventCount > 0) {
+                    pthread_mutex_lock(lock);
+                    read(epollEvent.data.fd, &data, sizeof(data));
+                    LOGD("StackHandleThread read event: %ld", data);
+                    if (data > 0L) {
+                        // Notify stack.
+                        callback(jniEnv, data, dumpState == WAITING_ANR_DUMP);
+                    }
+                    goto end;
+                    end:
                     dumpState = NO_DUMP;
                     pthread_mutex_unlock(lock);
+                }
             }
+        } else {
+            LOGE("Create epoll fail.");
         }
     } else {
         LOGE("Attach thread to Jvm fail: %d", ret);
     }
+    jvm->DetachCurrentThread();
     return nullptr;
 }
 
@@ -171,7 +189,7 @@ int initDumpStack(const char* anrTraceDir,
     origin_write = write;
     ret = hookSignalCatcherWrite();
     if (ret == 0) {
-        gStackNotifyFd = eventfd(0, EFD_CLOEXEC);
+        gStackNotifyFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
         if (gStackNotifyFd > 0) {
             pthread_t stackHandleThread;
             DumpStackParams* params = new DumpStackParams;
