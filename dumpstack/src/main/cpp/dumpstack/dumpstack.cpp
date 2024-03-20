@@ -230,8 +230,8 @@ static void anrSignalHandler(int sig, siginfo_t *sig_info, void *uc) {
         }
         pthread_mutex_unlock(lock);
     }
-    // syscall(SYS_tgkill, myPid, gSignalCatcherTid, SIGQUIT);
-    originAnrSigaction.sa_sigaction(sig, sig_info, uc);
+    syscall(SYS_tgkill, myPid, gSignalCatcherTid, SIGQUIT);
+    // originAnrSigaction.sa_sigaction(sig, sig_info, uc);
 }
 
 int monitorAnr() {
