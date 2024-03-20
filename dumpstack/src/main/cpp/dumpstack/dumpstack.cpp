@@ -22,6 +22,7 @@ static int gStackNotifyFd = -1;
 static bool isInited = false;
 static pthread_mutex_t *lock = nullptr;
 static bool isMonitorAnrSig = false;
+static struct sigaction originAnrSigaction {};
 
 enum DumpStackState {
     NO_DUMP,
@@ -51,16 +52,16 @@ void* stackHandleRoutine(void* args) {
             memset(&epollEvent, 0, sizeof(epollEvent));
             epollEvent.events = EPOLLIN; // Can read.
             epollEvent.data.fd = gStackNotifyFd;
-            epoll_ctl(epollFd, EPOLL_CTL_ADD, gStackNotifyFd, &epollEvent);
-
+            ret = epoll_ctl(epollFd, EPOLL_CTL_ADD, gStackNotifyFd, &epollEvent);
+            LOGD("StackHandleThread launched: %d", ret);
             long data;
             while (true) {
                 // wait infinity
                 int eventCount = epoll_wait(epollFd, &epollEvent, 1, -1);
                 if (eventCount > 0) {
                     pthread_mutex_lock(lock);
-                    read(epollEvent.data.fd, &data, sizeof(data));
-                    LOGD("StackHandleThread read event: %ld", data);
+                    int readSize = read(epollEvent.data.fd, &data, sizeof(data));
+                    LOGD("StackHandleThread read event: %ld, size: %d", data, readSize);
                     if (data > 0L) {
                         // Notify stack.
                         callback(jniEnv, data, dumpState == WAITING_ANR_DUMP);
@@ -105,9 +106,12 @@ ssize_t my_write(int fd, const void *const buf, size_t count) {
                 LOGE("Create file fail: %d", fd);
                 goto end;
             }
-            write(fileFd, buf, count);
+            LOGD("Start write stack file.");
+            int writeSize = origin_write(fileFd, buf, count);
             close(fileFd);
-            write(gStackNotifyFd, &time, sizeof(time));
+            LOGD("Write stack file success, size: %d", writeSize);
+            int notifyWriteSize = origin_write(gStackNotifyFd, &time, sizeof(time));
+            LOGD("Notify write size: %d", notifyWriteSize);
             goto end;
         } else {
             goto end;
@@ -226,7 +230,8 @@ static void anrSignalHandler(int sig, siginfo_t *sig_info, void *uc) {
         }
         pthread_mutex_unlock(lock);
     }
-    syscall(SYS_tgkill, myPid, gSignalCatcherTid, SIGQUIT);
+    // syscall(SYS_tgkill, myPid, gSignalCatcherTid, SIGQUIT);
+    originAnrSigaction.sa_sigaction(sig, sig_info, uc);
 }
 
 int monitorAnr() {
@@ -244,7 +249,7 @@ int monitorAnr() {
                 sigfillset(&sigAction.sa_mask);
                 sigAction.sa_flags = SA_RESTART | SA_ONSTACK | SA_SIGINFO;
                 sigAction.sa_sigaction = anrSignalHandler;
-                ret = sigaction(SIGQUIT, &sigAction, nullptr);
+                ret = sigaction(SIGQUIT, &sigAction, &originAnrSigaction);
                 if (ret == 0) {
                     LOGD("Monitor anr signal success.");
                 } else {

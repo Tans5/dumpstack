@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.tans.dumpstack.demo"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
