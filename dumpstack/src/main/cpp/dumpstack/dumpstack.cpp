@@ -60,11 +60,13 @@ void* stackHandleRoutine(void* args) {
                 int eventCount = epoll_wait(epollFd, &epollEvent, 1, -1);
                 if (eventCount > 0) {
                     pthread_mutex_lock(lock);
-                    int readSize = read(epollEvent.data.fd, &data, sizeof(data));
+                    int readSize = TEMP_FAILURE_RETRY(read(epollEvent.data.fd, &data, sizeof(data)));
                     LOGD("StackHandleThread read event: %ld, size: %d", data, readSize);
-                    if (data > 0L) {
+                    if (data > 0L && readSize == sizeof(data)) {
                         // Notify stack.
                         callback(jniEnv, data, dumpState == WAITING_ANR_DUMP);
+                    } else {
+                        LOGE("StackHandleThread read wrong event data: %ld", data);
                     }
                     goto end;
                     end:
@@ -110,8 +112,13 @@ ssize_t my_write(int fd, const void *const buf, size_t count) {
             int writeSize = origin_write(fileFd, buf, count);
             close(fileFd);
             LOGD("Write stack file success, size: %d", writeSize);
-            int notifyWriteSize = origin_write(gStackNotifyFd, &time, sizeof(time));
-            LOGD("Notify write size: %d", notifyWriteSize);
+            int notifyWriteSize = TEMP_FAILURE_RETRY(origin_write(gStackNotifyFd, &time, sizeof(time)));
+            if (notifyWriteSize == sizeof(time)) {
+                LOGD("Notify StackHandleThread success.");
+            } else {
+                LOGE("Notify StackHandleThread fail: %d", notifyWriteSize);
+                dumpState = NO_DUMP;
+            }
             goto end;
         } else {
             goto end;
