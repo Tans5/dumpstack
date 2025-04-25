@@ -1,4 +1,6 @@
 
+Move to [tApm](https://github.com/Tans5/tApm).
+
 ## Summary
 
 Monitor APP ANR and get all thread stack. 
